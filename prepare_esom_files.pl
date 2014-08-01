@@ -9,6 +9,12 @@ use Bio::SeqIO;
 # Version 1.02, 12/28/2012, (search for "V1.02") 
 # Version 1.03, 09/03/2013, Fixed a bug that made lower-case sequences to be ignored (look for "V1.03"). Also fixed time/date printing and added 
 #                           command line printout
+# Version 1.04, 06/20/2014, Added the option of multiple k-mer sizes 
+# Version 1.05, 07/21/2014, fixed 3 small bugs (thanks to Chris Miller): 
+#                           (1) a bug that made the script miss sequences of sizes exactly $min_size, 
+#                           (2) a bug that reported a wrong number of bps for segments of size <= eindow-size
+#                           (3) a bug that made the calculation of k-mer frequencies slightly wrong. This bug is expected to affect only
+#                               very short window sizes (e.g. a few dozen bps) which are usually not used.
 ######################################################################################################################################################
 # Copyright (C) 2012 Itai Sharon
 #
@@ -28,8 +34,8 @@ use Bio::SeqIO;
 ######################################################################################################################################################
 # User-defined parameters
 ######################################################################################################################################################
-my $VERSION = "prepare_esom_files.pl V1.03";
-my $kmer_size = 4;			# 0 means no DNA signature
+my $VERSION = "prepare_esom_files.pl V1.05";
+my @kmer_size = (4);			# 0 means no DNA signature
 my $normalize_abundance_pattern = 1;	# 2: log-transform, 1: normalize abundance pattern rows, 0: don't normalize
 my $output_coverage = 0;		# 3: Add log-transformed coverage, 2: Add normalized coverage, 1: add coverage as a separate column, 0: don't add coverage
 #my $output_normalized_coverage = 0;	# Same as $output_coverage but if (1) the coverage is normalized by the highest coverage 
@@ -48,13 +54,13 @@ my %class2annotation = ();
 sub usage {
 	my $prog = $0;
 	$prog =~ s/.+\///;
-	print STDERR "\nUsage: $prog [-k <k-mer size>] [--raw_abundances | --log_transform] [--coverage | --normalized_coverage | --log_transform_coverage]\n";
+	print STDERR "\nUsage: $prog [-k <k1>[,<k2>...,<kn>]] [--raw_abundances | --log_transform] [--coverage | --normalized_coverage | --log_transform_coverage]\n";
 	print STDERR "                             [-w <window-size>] [-a <annotation-file>] [-m <min-segment-size>]\n";
 	print STDERR "                             [-sg <sam-files-glob>] [-sa <id> <sam-file-1> ... <sam-file-m>]\n";
 	print STDERR "                             <out-directory> <assembly-file>\n\n";
 	print STDERR "Option                    \t| Meaning\n";
 	print STDERR "-------------------------------------------------------------------------------------------------------------------------------------\n";
-	print STDERR "-k                        \t| Specify K-mer size (must be >=0, 0 means no DNA signature statistics to be used. Default=4)\n";
+	print STDERR "-k                        \t| Comma-delimited K-mer sizes (must be >=0, 0 means no DNA signature statistics to be used. Default=4)\n";
 	print STDERR "-sg                       \t| Specify SAM file glob path for the computation of abundance pattern. Each file will be assigned\n";
 	print STDERR "                          \t| a different dimensions. This parameter can be specified multiple times for different glob paths\n";
 	print STDERR "                          \t| and is not mutually exclusive with the -si parameters.\n";
@@ -92,7 +98,19 @@ my %files = ();
 while($ARGV[0] =~ /^\-/) {
 	my $flag = shift @ARGV;
 	if($flag eq '-k') {
-		$kmer_size = shift(@ARGV);
+		if($ARGV[0] eq '0') {
+			@kmer_size = ();
+		}
+		else {
+			my %kfound = ();
+			@kmer_size = split(/,/, $ARGV[0]);
+			foreach (@kmer_size) {
+				($_ =~ /^[1-9]\d*$/) || die "\nError: k-mer string must be a comma-delimited string of positive integers (found $ARGV[0])\n\n";
+				!exists($kfound{$_}) || die "Error: found k-mer $_ more than once in -k string ($ARGV[0])\n\n";
+				$kfound{$_} = 1;
+			}
+		}
+		shift(@ARGV);
 	}
 	elsif($flag eq '-w') {
 		$window_size = shift(@ARGV);
@@ -248,8 +266,8 @@ while(my $scaf = $in->next_seq) {
 	if($scaf->length < $window_size) {
 		my @subseqs = split(/N+/, $s);
 		my $nbps = ($s =~ tr/ACGT/ACGT/);
-		($nbps > $min_size) || next;
-		$segments{$scaf->display_id}{1} = [$scaf->length-1, scalar(@subseqs), $nbps, $scaf->display_id . '_1'];	# V1.02
+		($nbps >= $min_size) || next;	# v1.05: fixed from ">" to ">="
+		$segments{$scaf->display_id}{1} = [$scaf->length, scalar(@subseqs), $nbps, $scaf->display_id . '_1'];	# V1.02, v1.05
 		$nsegments++;
 		next;
 	}
@@ -354,10 +372,14 @@ print STDERR "ok\n" if((keys %column2files) > 0);
 # alphabetical order
 my @mer_order = ();
 my %DNA_signature_columns = ();
-if($kmer_size > 0) {
-	print STDERR "Computing DNA signature ... ";
-	my %mer_dictionary = ();
-	make_list_of_possible_tetramers('', $kmer_size, \%mer_dictionary, \@mer_order);
+
+while(@kmer_size > 0) {
+	my $k = shift(@kmer_size);
+	print STDERR "Computing DNA signature for k=$k ... ";
+	my %kmer_dictionary = ();
+	my @kmer_order = ();
+	make_list_of_possible_tetramers('', $k, \%kmer_dictionary, \@kmer_order);
+	push(@mer_order, @kmer_order);
 
 	my $in = new Bio::SeqIO(-file => $assembly_file);
 
@@ -367,9 +389,9 @@ if($kmer_size > 0) {
 			my $end = $segments{$seq->display_id}{$start}[0];
 			my $s = $seq->subseq($start, $end);	# V1.02
 			$s =~ tr/acgtn/ACGTN/;	# V1.03
-			my @mer_dist = ();
-			calc_kmer_dist($s, \@mer_dist, \%mer_dictionary, \@mer_order, $kmer_size);
-			$DNA_signature_columns{$seq->display_id}{$start} = \@mer_dist;	
+			my @kmer_dist = ();
+			calc_kmer_dist($s, \@kmer_dist, \%kmer_dictionary, \@kmer_order, $k);
+			push(@{$DNA_signature_columns{$seq->display_id}{$start}}, @kmer_dist);	
 		}
 	}
 	print STDERR "ok\n";
@@ -471,7 +493,7 @@ sub calc_kmer_dist {
 	# Note: sequences may contain N's (see above in the segments computation part)
 	my ($seq, $mer_dist_ref, $mer_dictionary_ref, $mer_order_ref, $k) = @_;
 	my @subseqs = split(/N+/, $seq);
-	my $total = length($seq)-@subseqs*($k+1);
+	my $total = length($seq)-@subseqs*($k-1); # v1.05: changed from +1 to -1. 
 	my %dist = ();
 	foreach my $s (@subseqs) {
 		my $n = length($s)-$k;
