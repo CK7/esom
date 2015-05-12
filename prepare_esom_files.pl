@@ -15,6 +15,8 @@ use Bio::SeqIO;
 #                           (2) a bug that reported a wrong number of bps for segments of size <= eindow-size
 #                           (3) a bug that made the calculation of k-mer frequencies slightly wrong. This bug is expected to affect only
 #                               very short window sizes (e.g. a few dozen bps) which are usually not used.
+# Version 1.06, 10/13/2014, Fixed a bug that made the script ignore scaffolds that are long enough but do not have any segment whose length is
+#                           at least of window size. 
 ######################################################################################################################################################
 # Copyright (C) 2012 Itai Sharon
 #
@@ -259,46 +261,38 @@ my $in = new Bio::SeqIO(-file => $assembly_file);
 
 while(my $scaf = $in->next_seq) {
 	next if($scaf->length < $min_size);
-	my $s = 'X' . $scaf->seq;	# V1.02
+	my $s = 'X' . $scaf->seq;	# V1.02: we want coordinate to start at 1
 	$s =~ tr/acgtn/ACGTN/;
-	# If the sequence is shorter than a window size then we will treat it as just one piece, even with N's. Sequence will be excluded 
-	# if the number of non-N's is smaller than $min_size;
-	if($scaf->length < $window_size) {
-		my @subseqs = split(/N+/, $s);
-		my $nbps = ($s =~ tr/ACGT/ACGT/);
-		($nbps >= $min_size) || next;	# v1.05: fixed from ">" to ">="
-		$segments{$scaf->display_id}{1} = [$scaf->length, scalar(@subseqs), $nbps, $scaf->display_id . '_1'];	# V1.02, v1.05
-		$nsegments++;
-		next;
-	}
+	$s =~ s/N+$//;
+	$s .= 'N';
+	my $nbps = ($s =~ tr/ACGT/ACGT/);
+	# Number of good bps must at least be equal to $min_size
+	($nbps >= $min_size) || next;
+	my $ncsegments = int($nbps/$window_size);
+	$ncsegments = 1 if($ncsegments == 0);		# True if $nbps < $window_size but $nbps >= $min_size
+	my $cwindow_size = int($nbps/$ncsegments);	# That's the actual window size. Always ge $window_size unless $nbps < $window_size in which case $nbps >= $min_size
 
-	$s .= 'NX';	# This will ensure that the loop below will cover all segments, including the last one 
 	my $start = 1;	# V1.02
 	my $index = 1;
-	while($s =~ m/(N+)/g) {
-		my $end = pos($s)-length($1)-1;
-		# v1.01: We will use the segment if it's bigger than either $min_size or $window_size 
-		if(($end-$start+1 < $window_size) && ($end-$start+1 < $min_size)) {
-			$start = pos($s);
-			next;
-		}
-		my $ncsegments = int(($end-$start+1)/$window_size);
-		$ncsegments = 1 if($ncsegments == 0);
-		my $cwindow_size = int(($end-$start+1)/$ncsegments);
-		foreach my $i (1 .. ($ncsegments-1)) {
-			my $subseq = substr($s, $start, $cwindow_size);
-			my $nbps = ($subseq =~ tr/ACGT/ACGT/);
-			$segments{$scaf->display_id}{$start} = [$start+$cwindow_size-1, 0, $nbps, $scaf->display_id . "_$index"];	# V1.02
-			$start += $cwindow_size;
+	my $ngood_bps = 0;
+	my $nNs = 0;
+	while($s =~ m/([ACGT]+)/g) {
+		my $start_on_this_segment = 0;
+		while($ngood_bps+length($1)-$start_on_this_segment >= $cwindow_size) {
+			my $end = pos($s) - length($1) + $start_on_this_segment + $cwindow_size - $ngood_bps - 1;
+			$segments{$scaf->display_id}{$start} = [$end, $nNs, $cwindow_size, $scaf->display_id . "_$index"]; 
+			$nsegments++;
 			$index++;
+			$nNs = 0;
+			$start_on_this_segment += $cwindow_size - $ngood_bps;
+			$ngood_bps = 0;
+			$start = pos($s) - length($1) + $start_on_this_segment;			
 		}
-		my $subseq = substr($s, $start, $end-$start+1);	# V1.02
-		my $nbps = ($subseq =~ tr/ACGT/ACGT/);
-		$segments{$scaf->display_id}{$start} = [$end, 1, $nbps, $scaf->display_id . "_$index"];
-		$start = pos($s);
-		$index++;
-		$nsegments += $ncsegments;
+		$ngood_bps += length($1)-$start_on_this_segment;
+		$nNs = ($nNs == 0)? 2 : ($nNs+1);
 	}
+
+	# Last few bps may be nglected 
 }
 print STDERR "ok, $nsegments segments assigned\n";
 
@@ -380,6 +374,8 @@ while(@kmer_size > 0) {
 	my @kmer_order = ();
 	make_list_of_possible_tetramers('', $k, \%kmer_dictionary, \@kmer_order);
 	push(@mer_order, @kmer_order);
+	pop(@mer_order) if($k==1);		# v1.06: for k=1 freq(A/T) = 1-freq(C/G). For the other k sizes the last columns can be ignored if
+						# all information is used at once 
 
 	my $in = new Bio::SeqIO(-file => $assembly_file);
 
@@ -391,6 +387,7 @@ while(@kmer_size > 0) {
 			$s =~ tr/acgtn/ACGTN/;	# V1.03
 			my @kmer_dist = ();
 			calc_kmer_dist($s, \@kmer_dist, \%kmer_dictionary, \@kmer_order, $k);
+			pop(@kmer_dist) if($k==1);             # v1.06
 			push(@{$DNA_signature_columns{$seq->display_id}{$start}}, @kmer_dist);	
 		}
 	}
