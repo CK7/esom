@@ -17,6 +17,7 @@ use Bio::SeqIO;
 #                               very short window sizes (e.g. a few dozen bps) which are usually not used.
 # Version 1.06, 10/13/2014, Fixed a bug that made the script ignore scaffolds that are long enough but do not have any segment whose length is
 #                           at least of window size. 
+# Version 1.07, 05/18/2016, Permitted reading of BAM files if samtools installed
 ######################################################################################################################################################
 # Copyright (C) 2012 Itai Sharon
 #
@@ -36,7 +37,7 @@ use Bio::SeqIO;
 ######################################################################################################################################################
 # User-defined parameters
 ######################################################################################################################################################
-my $VERSION = "prepare_esom_files.pl V1.05";
+my $VERSION = "prepare_esom_files.pl V1.07";
 my @kmer_size = (4);			# 0 means no DNA signature
 my $normalize_abundance_pattern = 1;	# 2: log-transform, 1: normalize abundance pattern rows, 0: don't normalize
 my $output_coverage = 0;		# 3: Add log-transformed coverage, 2: Add normalized coverage, 1: add coverage as a separate column, 0: don't add coverage
@@ -48,6 +49,7 @@ my $min_size = 3000;			# Minimum size for considering scaffolds
 my $window_size = 3000;			
 my $read_size = 0;
 my $out_directory = undef;		# Output directory, mandatory 
+my $bam = 0;				# "SAM" files are in BAM format, requires samtools, V1.07
 my %column2files = ();
 my %scaf2class = ();
 my %class2annotation = ();
@@ -68,6 +70,7 @@ sub usage {
 	print STDERR "                          \t| and is not mutually exclusive with the -si parameters.\n";
 	print STDERR "-sa                       \t| Specify SAM files for specific abundance pattern column. id is the identifier of the column\n";
 	print STDERR "                          \t| and all arguments after and until the next flag (or the last 2 parameters) are files that\n";
+        print STDERR "--bam                     \t| \"SAM\" files are in BAM format, requires \"samtools\"\n";	# V1.07
 	print STDERR "                          \t| will be used for that column.\n";
 	print STDERR "--log_transform           \t| log-transform each abundance pattern value (default: normalize rows)\n";
 	print STDERR "--raw_abundances          \t| Do not normalize abundance pattern over all samples (default: normalize rows)\n";
@@ -150,6 +153,9 @@ while($ARGV[0] =~ /^\-/) {
 			$files{$sam_file} = 1;
 		}
 	}
+	elsif($flag eq '--bam') {	# V1.07 
+		$bam = 1;
+	}
 	elsif($flag eq '--raw_abundances') {
 		$normalize_abundance_pattern = 0;
 	}
@@ -217,7 +223,11 @@ foreach my $column_id (sort keys %column2files) {
 	foreach my $sam_file (keys %{$column2files{$column_id}}) {
 		print STDERR "Reading $sam_file (column $column_id) ... ";
 		my $file_total = 0;
-		open(IN, $sam_file) || die "\nCannot read $sam_file\n\n";
+                if($bam eq 0) {	#V1.07
+			open(IN, $sam_file) || die "\nCannot read $sam_file\n\n";
+		} elsif($bam eq 1) {
+			open(IN, "samtools view -h $sam_file |") || die "\n$^E\nCannot read $sam_file\n\n";
+		}
 		while(<IN>) {
 			if($_ =~ /^\@SQ/) {
 				# @SQ	SN:NODE_840_length_578_cov_29.223183.36.514	LN:479
